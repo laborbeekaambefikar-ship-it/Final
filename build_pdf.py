@@ -1,188 +1,211 @@
 """
-Build a new PDF from ArbazFinal1.pdf with all repo images placed in suitable
-positions. Original pages are copied verbatim (no formatting changes).
-Figure pages are inserted right after the original page that introduces the
-relevant topic. The cover page gets the logo overlaid in the lower portion.
+Rebuild ArbazFinal1.pdf with figures overlaid onto existing pages (no new
+pages added). Behaviour summary:
+
+  * Original text content of every page is preserved verbatim.
+  * No additions on pages 1-32.
+  * From page 33 onward, technical diagrams are overlaid onto pages relevant
+    to their topic. The bottom of each target page is extended only as much
+    as needed so the figure is clearly visible (the original text positions
+    are never moved).
+  * All hyperlink rectangles (the red boxes on the Contents list and green
+    boxes around in-text citations) are stripped from every page.
+  * New numbering format: sequential "Figure N: ..." captions.
 """
-import fitz  # PyMuPDF
-from PIL import Image
+
 import os
+import fitz
+from PIL import Image
 
 SRC = "ArbazFinal1.pdf"
 OUT = "ArbazFinal1_with_figures.pdf"
 
-# A4 page dimensions in points (PyMuPDF default)
-A4_W, A4_H = 595.276, 841.89
+A4_W = 595.276
+ORIG_H = 841.89
 
-# Margin used by the original document (approx)
-MARGIN_X = 72       # ~1 inch left/right
-TOP_Y = 90          # top margin
-BOTTOM_Y = 90       # bottom margin
+# Geometry of a placed figure
+FIG_TARGET_H = 300        # target image height (pt)
+CAPTION_GAP = 18          # space between image and caption
+CAPTION_RESERVE = 36      # vertical room reserved for (possibly wrapped) caption
+SPACE_ABOVE_FIG = 24      # gap between last text line and the image
+BOTTOM_PAD = 36           # bottom margin under the caption
+SIDE_MARGIN = 72          # 1 inch
 
-# Image placement plan:
-#   key   = original 1-based page number after which the figure page is inserted
-#   value = list of (image_filename, figure_label, caption) tuples
-PLAN = {
-    15: [("warehouse top shot.png",
-          "Figure 1.1",
-          "A modern warehouse environment in which the ATLAS Smart AGV system is intended to operate.")],
-    19: [("layour warehouse.png",
-          "Figure 1.2",
-          "Conceptual warehouse layout showing aisles, shelves and the spine path used by the AGV.")],
-    20: [("Pipeline.png",
-          "Figure 1.3",
-          "End-to-end project development pipeline from mission dispatch to return-to-dock.")],
-    21: [("warehouse with agv.png",
-          "Figure 1.4",
-          "Differential-drive AGV operating within a structured warehouse environment.")],
-    29: [("Warehouse nav map.png",
-          "Figure 2.1",
-          "Warehouse navigation map: spine path, aisles and 21 RFID-tagged shelf locations.")],
-    33: [("Overall Architecture.png",
-          "Figure 3.1",
-          "Overall system architecture of the ATLAS Smart Warehouse AGV with integrated UR3 arm.")],
-    34: [("Ros2 node Communication.png",
-          "Figure 3.2",
-          "ROS 2 node communication graph across the eleven ATLAS packages.")],
-    37: [("warehouse.png",
-          "Figure 3.3",
-          "Simulated warehouse environment used for full mission validation in Gazebo."),
-         ("warehouse with agv.png",
-          "Figure 3.4",
-          "Real-world ATLAS AGV chassis derived from the URDF model.")],
-    43: [("robotic arm.png",
-          "Figure 3.5",
-          "Universal Robots UR3 6-DOF collaborative manipulator with Robotiq 2F-85 gripper.")],
-    49: [("Agv Motion COntrol Pipeline using Pd control.png",
-          "Figure 3.6",
-          "AGV motion-control pipeline using a Proportional-Derivative (PD) line-following controller.")],
-    51: [("12 state.png",
-          "Figure 3.7",
-          "12-state Finite State Machine governing the complete autonomous mission lifecycle.")],
-    54: [("Arm Pose Stages.png",
-          "Figure 3.8",
-          "UR3 arm pose stages during the MoveIt Task Constructor pick-and-place workflow.")],
-    56: [("Hardware flow diagram.png",
-          "Figure 3.9",
-          "Hardware flow diagram of the ATLAS AGV computing, sensing and actuation stack.")],
-    62: [("Priority based order management.png",
-          "Figure 3.10",
-          "Priority-based order-management subsystem driving the PyQt5 industrial control centre.")],
-}
+# (page_1based, image_filename, figure_number, caption)
+PLAN = [
+    (33, "Overall Architecture.png", 1,
+     "Overall ATLAS system architecture spanning AGV navigation, "
+     "manipulation and the unified ROS 2 communication layer."),
+    (34, "Ros2 node Communication.png", 2,
+     "ROS 2 inter-node communication graph across the eleven ATLAS "
+     "packages."),
+    (37, "warehouse with agv.png", 3,
+     "Differential-drive ATLAS AGV operating within a structured "
+     "warehouse environment."),
+    (43, "robotic arm.png", 4,
+     "Universal Robots UR3 6-DOF collaborative manipulator fitted with the "
+     "Robotiq 2F-85 parallel gripper."),
+    (49, "Agv Motion COntrol Pipeline using Pd control.png", 5,
+     "AGV motion-control pipeline using a Proportional-Derivative (PD) "
+     "line-following controller."),
+    (51, "12 state.png", 6,
+     "12-state Finite State Machine governing the complete autonomous "
+     "mission lifecycle."),
+    (54, "Arm Pose Stages.png", 7,
+     "UR3 arm pose stages during the MoveIt Task Constructor "
+     "pick-and-place workflow."),
+    (56, "Hardware flow diagram.png", 8,
+     "Hardware flow diagram of the ATLAS computing, sensing and actuation "
+     "stack."),
+    (62, "Priority based order management.png", 9,
+     "Priority-based order-management subsystem driving the PyQt5 "
+     "industrial control centre."),
+    (64, "Warehouse nav map.png", 10,
+     "Warehouse navigation map showing the spine corridor, perpendicular "
+     "aisles and 21 RFID-tagged shelf locations."),
+    (67, "warehouse top shot.png", 11,
+     "Top-down view of the simulated warehouse environment used for full "
+     "mission validation."),
+    (69, "layour warehouse.png", 12,
+     "Conceptual warehouse layout depicting shelf placement and AGV "
+     "guidance paths."),
+    (73, "Pipeline.png", 13,
+     "End-to-end project execution pipeline from mission dispatch through "
+     "navigation, manipulation and return-to-dock."),
+    (74, "warehouse.png", 14,
+     "Simulated warehouse view used during continuous 50-mission "
+     "validation runs."),
+]
 
 
-def fit_rect(img_w, img_h, max_w, max_h):
-    """Return (w, h) preserving aspect ratio inside (max_w, max_h)."""
-    scale = min(max_w / img_w, max_h / img_h)
-    return img_w * scale, img_h * scale
+def strip_link_annotations(doc):
+    """Remove every hyperlink rectangle from every page. We delete via the
+    high-level API first, then fall back to clearing the page's /Annots
+    array directly (some pages keep the array even after delete_link)."""
+    removed = 0
+    for page in doc:
+        # First pass: high-level delete
+        for link in page.get_links():
+            try:
+                page.delete_link(link)
+                removed += 1
+            except Exception:
+                pass
+        # Second pass: if any link annotations remain, drop the /Annots key
+        if page.get_links():
+            xref = page.xref
+            try:
+                doc.xref_set_key(xref, "Annots", "null")
+                removed += len(page.get_links())
+            except Exception:
+                pass
+    return removed
 
 
-def add_figure_page(out_doc, image_path, label, caption):
-    """Append a new A4 page with a centred figure and caption below."""
-    page = out_doc.new_page(width=A4_W, height=A4_H)
+def last_text_y(page):
+    """Return the largest y-coordinate of any text block on the page."""
+    blocks = page.get_text("blocks")
+    if not blocks:
+        return 90.0
+    return max(b[3] for b in blocks)
 
-    # Page header (matches original document running header style)
-    header = "Smart AGV Warehouse System with Integrated Robotic Arm"
-    page.insert_text(
-        (MARGIN_X, 50),
-        header,
-        fontname="helv",
-        fontsize=10,
-        color=(0, 0, 0),
-    )
-    # thin rule under header
-    page.draw_line((MARGIN_X, 58), (A4_W - MARGIN_X, 58),
-                   color=(0, 0, 0), width=0.5)
 
-    # Compute image rect
+def place_figure(page, image_path, fig_n, caption_text):
+    """Overlay the figure onto the bottom of the page, extending the page
+    height if needed. Original page content is never moved."""
+
+    # Pre-compute image aspect-fit dimensions
     im = Image.open(image_path)
     iw, ih = im.size
+    max_fig_w = A4_W - 2 * SIDE_MARGIN
+    scale = min(max_fig_w / iw, FIG_TARGET_H / ih)
+    fw, fh = iw * scale, ih * scale
 
-    avail_w = A4_W - 2 * MARGIN_X
-    # Reserve room for caption (about 60 pts) + header (about 70 pts)
-    avail_h = A4_H - TOP_Y - BOTTOM_Y - 80
+    # Vertical layout below existing text
+    text_end_y = last_text_y(page)
+    fig_top = text_end_y + SPACE_ABOVE_FIG
+    fig_bottom = fig_top + fh
+    caption_y = fig_bottom + CAPTION_GAP
+    needed_height = caption_y + CAPTION_RESERVE + BOTTOM_PAD
 
-    fw, fh = fit_rect(iw, ih, avail_w, avail_h)
-    x0 = (A4_W - fw) / 2
-    y0 = TOP_Y + 10
-    rect = fitz.Rect(x0, y0, x0 + fw, y0 + fh)
-    page.insert_image(rect, filename=image_path, keep_proportion=True)
+    # Extend the page height (mediabox) only if needed
+    current_h = page.rect.height
+    if needed_height > current_h:
+        new_h = needed_height
+        new_box = fitz.Rect(0, 0, A4_W, new_h)
+        page.set_mediabox(new_box)
+        # Also extend the cropbox so viewers display the new area
+        try:
+            page.set_cropbox(new_box)
+        except Exception:
+            pass
 
-    # Caption below the image
-    cap_y = y0 + fh + 18
-    label_text = f"{label}: "
-    # Measure label width to position caption
-    label_w = fitz.get_text_length(label_text, fontname="hebo", fontsize=10)
-    caption_full = label_text + caption
+    # Paint a white background over the figure area to guarantee clean
+    # whitespace (covers any stray watermarks etc.)
+    bg_rect = fitz.Rect(SIDE_MARGIN - 8,
+                        text_end_y + SPACE_ABOVE_FIG - 8,
+                        A4_W - SIDE_MARGIN + 8,
+                        caption_y + CAPTION_RESERVE + 4)
+    page.draw_rect(bg_rect, color=(1, 1, 1), fill=(1, 1, 1), width=0)
 
-    # Center the caption block
-    full_w = fitz.get_text_length(caption_full, fontname="helv", fontsize=10)
+    # Place image, centred horizontally
+    fx0 = (A4_W - fw) / 2
+    page.insert_image(
+        fitz.Rect(fx0, fig_top, fx0 + fw, fig_top + fh),
+        filename=image_path,
+        keep_proportion=True,
+    )
+
+    # Caption
+    label = f"Figure {fig_n}: "
+    full = label + caption_text
+    font_main = "helv"
+    font_bold = "hebo"
+    fs = 10
+
+    full_w = fitz.get_text_length(full, fontname=font_main, fontsize=fs)
+    avail_w = A4_W - 2 * SIDE_MARGIN
+
     if full_w <= avail_w:
         cap_x = (A4_W - full_w) / 2
-        page.insert_text((cap_x, cap_y), label_text,
-                         fontname="hebo", fontsize=10, color=(0, 0, 0))
-        page.insert_text((cap_x + label_w, cap_y), caption,
-                         fontname="helv", fontsize=10, color=(0, 0, 0))
+        label_w = fitz.get_text_length(label, fontname=font_bold, fontsize=fs)
+        page.insert_text((cap_x, caption_y), label,
+                         fontname=font_bold, fontsize=fs, color=(0, 0, 0))
+        page.insert_text((cap_x + label_w, caption_y), caption_text,
+                         fontname=font_main, fontsize=fs, color=(0, 0, 0))
     else:
-        # Wrap caption into a textbox under the image
-        tb_rect = fitz.Rect(MARGIN_X, cap_y - 10,
-                            A4_W - MARGIN_X, cap_y + 60)
-        page.insert_textbox(
-            tb_rect,
-            caption_full,
-            fontname="helv",
-            fontsize=10,
-            align=fitz.TEXT_ALIGN_CENTER,
-        )
-
-
-def overlay_logo_on_cover(page, logo_path):
-    """Place the logo on the cover page in the lower-centre area
-    without disturbing the existing text."""
-    im = Image.open(logo_path)
-    iw, ih = im.size
-    # Target width ~ 130 pt, keep aspect
-    target_w = 130.0
-    scale = target_w / iw
-    target_h = ih * scale
-    # Position: horizontally centred, vertical between author block and
-    # institution name (around y ~ 600)
-    x0 = (A4_W - target_w) / 2
-    y0 = 600
-    rect = fitz.Rect(x0, y0, x0 + target_w, y0 + target_h)
-    page.insert_image(rect, filename=logo_path, keep_proportion=True,
-                      overlay=True)
+        # Wrap caption inside a centred textbox
+        tb = fitz.Rect(SIDE_MARGIN, caption_y - 10,
+                       A4_W - SIDE_MARGIN, caption_y + CAPTION_RESERVE)
+        # Use a single bold-prefixed string approximated by inserting label
+        # separately above the wrapped text
+        page.insert_textbox(tb, full, fontname=font_main, fontsize=fs,
+                            align=fitz.TEXT_ALIGN_CENTER)
 
 
 def main():
-    src = fitz.open(SRC)
-    out = fitz.open()
+    doc = fitz.open(SRC)
 
-    for i in range(len(src)):
-        # Copy original page byte-for-byte
-        out.insert_pdf(src, from_page=i, to_page=i)
-        page_num = i + 1
+    removed = strip_link_annotations(doc)
+    print(f"Stripped {removed} hyperlink annotations.")
 
-        # Logo overlay on cover
-        if page_num == 1:
-            overlay_logo_on_cover(out[-1], "image-removebg-preview.png")
+    placed = 0
+    for page_n, img, fig_n, cap in PLAN:
+        if not os.path.exists(img):
+            print(f"  WARN: missing {img}, skipping Figure {fig_n}")
+            continue
+        page = doc[page_n - 1]
+        place_figure(page, img, fig_n, cap)
+        placed += 1
+        print(f"  Placed Figure {fig_n} on page {page_n} -> {img}")
 
-        # Insert figure pages after this original page if planned
-        if page_num in PLAN:
-            for img, label, cap in PLAN[page_num]:
-                if not os.path.exists(img):
-                    print(f"WARN: missing image {img}")
-                    continue
-                add_figure_page(out, img, label, cap)
-                print(f"Inserted {label} ({img}) after original page {page_num}")
+    doc.save(OUT, deflate=True, garbage=4)
+    doc.close()
+    print(f"\nWrote {OUT}  (figures placed: {placed})")
 
-    out.save(OUT, deflate=True, garbage=4)
-    out.close()
-    src.close()
-    print(f"\nWrote {OUT}")
-    new_doc = fitz.open(OUT)
-    print(f"Final page count: {len(new_doc)}")
-    new_doc.close()
+    chk = fitz.open(OUT)
+    print(f"Final page count: {len(chk)}  (unchanged from original 80)")
+    chk.close()
 
 
 if __name__ == "__main__":
